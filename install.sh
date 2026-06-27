@@ -20,6 +20,24 @@ set -euo pipefail
 
 OPS_MCP_URL="https://api.ops.flock.com/ops-mcp"
 S3_BASE="https://s3browser.ops.riva.co/titan-logs-use/titanx"
+
+# --- Static URLs (update here; do not hardcode elsewhere) ---
+GRAFANA_ENDPOINT="https://grafana.eks.ops.titan.email"
+SENTRY_ENDPOINT="https://sentry.eks.ops.titan.email"
+
+URL_GCX="https://github.com/grafana/gcx"
+URL_SENTRY_CLI="https://cli.sentry.dev"
+URL_KUBECTL="https://kubernetes.io/docs/tasks/tools"
+URL_GH_CLI="https://cli.github.com"
+
+URL_AGENT_CLAUDE="https://claude.ai/code"
+URL_AGENT_OPENCODE="https://opencode.ai"
+URL_AGENT_CODEX="https://chatgpt.com/codex"
+URL_AGENT_AGY="https://antigravity.google"
+
+URL_CLI_PREFERRED_DOC="https://www.anthropic.com/engineering/code-execution-with-mcp"
+URL_SAMPLE_QUESTIONS="https://github.com/talk-to/ops-mcp/blob/main/docs/SampleQuestions.md"
+URL_COMPANION_DOCS="https://github.com/talk-to/ops-mcp/tree/main#companion-tools"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 TEMPLATE="$SRC/titanx"
 
@@ -65,7 +83,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Start fetching the Claude MCP list in the background early (major speedup)
+# Fetch the Claude user-level MCP list in the background early (major speedup).
+# Claude Code-specific: used to detect MCP fallbacks for companion tools.
+# Non-Claude agents configure their own MCPs separately; mcp_present() returns
+# false for those installs, so MCP fallback suggestions are skipped.
 MCP_LIST_FILE="/tmp/claude_mcp_list_$$"
 CLAUDE_MCP_PID=""
 if have claude; then
@@ -109,7 +130,7 @@ fetch_tokens(){
 # user-level MCPs are accepted as fallback if the CLIs aren't installed.
 write_project_mcp_json(){
   local path="$1"
-  printf '{\n  "mcpServers": {\n    "ops-mcp": {\n      "type": "http",\n      "url": "https://api.ops.flock.com/ops-mcp"\n    }\n  }\n}\n' > "$path"
+  printf '{\n  "mcpServers": {\n    "ops-mcp": {\n      "type": "http",\n      "url": "%s"\n    }\n  }\n}\n' "$OPS_MCP_URL" > "$path"
 }
 
 # write_env_file path [inc_grafana=1] [inc_sentry=1]
@@ -121,8 +142,8 @@ write_env_file(){
   {
     printf '# Read-only service-account tokens — written by titanx installer\n'
     if [ "$inc_grafana" -eq 1 ]; then
-      printf '# gcx (Grafana CLI): https://github.com/grafana/gcx\n'
-      printf 'GRAFANA_URL=https://grafana.eks.ops.titan.email\n'
+      printf '# gcx (Grafana CLI): %s\n' "$URL_GCX"
+      printf 'GRAFANA_URL=%s\n' "$GRAFANA_ENDPOINT"
       if [ -n "$TITANX_GRAFANA_TOKEN" ]; then
         printf 'GRAFANA_TOKEN=%s\n' "$TITANX_GRAFANA_TOKEN"
       else
@@ -130,8 +151,8 @@ write_env_file(){
       fi
     fi
     if [ "$inc_sentry" -eq 1 ]; then
-      printf '# sentry CLI: https://cli.sentry.dev\n'
-      printf 'SENTRY_URL=https://sentry.eks.ops.titan.email\n'
+      printf '# sentry CLI: %s\n' "$URL_SENTRY_CLI"
+      printf 'SENTRY_URL=%s\n' "$SENTRY_ENDPOINT"
       if [ -n "$TITANX_SENTRY_TOKEN" ]; then
         printf 'SENTRY_AUTH_TOKEN=%s\n' "$TITANX_SENTRY_TOKEN"
       else
@@ -145,19 +166,178 @@ write_env_file(){
 s3_fetch(){ local u; u=$(curl -sf "$S3_BASE/$1" | grep -o 'href="[^"]*"' | head -1 | sed 's/href="//;s/"//;s/&amp;/\&/g'); [ -n "$u" ] || return 1; curl -sf "$u"; }
 
 ALIAS_RC=""
-set_titanx_alias() {
-  local alias_line="alias titanx='cd \"$TARGET\" && claude'"
+
+# TITANX_AGENTS: ordered list of supported AI agents (binary:label pairs).
+TITANX_AGENTS=(
+  "claude:Claude Code"
+  "opencode:OpenCode"
+  "codex:OpenAI Codex"
+  "agy:Antigravity"
+)
+
+# select_agent prompts the user to pick an AI agent from those available in PATH.
+# Sets SELECTED_AGENT to the chosen binary name. Exits if none are installed.
+SELECTED_AGENT=""
+AGENT_AUTOSELECTED=0
+select_agent() {
+  local current="${1:-}"
+  local i=1 entries=() labels=()
+  for pair in "${TITANX_AGENTS[@]}"; do
+    local bin="${pair%%:*}" label="${pair#*:}"
+    have "$bin" || continue
+    entries+=("$bin")
+    labels+=("$label")
+  done
+
+  if [ "${#entries[@]}" -eq 0 ]; then
+    echo -e "   ${symbol_error} ${COLOR_RED}No supported AI agent found in PATH.${COLOR_RESET}"
+    echo -e "     Install one of: claude, opencode, codex, agy — then re-run install.sh"
+    exit 1
+  fi
+
+  if [ "${#entries[@]}" -eq 1 ]; then
+    SELECTED_AGENT="${entries[0]}"
+    AGENT_AUTOSELECTED=1
+    echo -e "   ${symbol_success} AI agent: ${COLOR_CYAN}${SELECTED_AGENT}${COLOR_RESET} ${COLOR_GRAY}(only available agent)${COLOR_RESET}"
+    echo
+    return
+  fi
+
+  echo -e " ${symbol_arrow} ${COLOR_BOLD}Select AI Agent:${COLOR_RESET}"
+  for idx in "${!entries[@]}"; do
+    local bin="${entries[$idx]}" label="${labels[$idx]}"
+    local marker="  "
+    [ "$bin" = "$current" ] && marker="${COLOR_PURPLE}➜${COLOR_RESET} "
+    printf "   %s%d) %-12s ${COLOR_GRAY}%s${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
+  done
+  printf "   ${COLOR_GRAY}Press number to select❯${COLOR_RESET} "
+  local choice
+  read -r choice </dev/tty
+  if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#entries[@]}" ]; then
+    SELECTED_AGENT="${entries[$((choice-1))]}"
+  else
+    SELECTED_AGENT="${current:-${entries[0]}}"
+  fi
+  echo
+}
+
+# write_agent_conf writes/updates AGENT in conf.txt.
+write_agent_conf() {
+  local agent="$1" conf="$TARGET/conf.txt"
+  if [ -f "$conf" ]; then
+    local tmp; tmp="$(mktemp)"
+    grep -v '^AGENT=' "$conf" > "$tmp"
+    printf 'AGENT=%s\n' "$agent" >> "$tmp"
+    cat "$tmp" > "$conf"; rm -f "$tmp"
+  fi
+}
+
+# set_titanx_function writes the titanx shell function to the user's rc file.
+# The function reads AGENT and other settings from conf.txt at call time.
+set_titanx_function() {
+  local target="$TARGET"
   case "${SHELL##*/}" in
     zsh)  ALIAS_RC="$HOME/.zshrc" ;;
     bash) ALIAS_RC="$HOME/.bashrc" ;;
-    *)    echo -e "   ${symbol_warn} Shell not supported automatically. Please add this manually to your shell config:"
-          echo -e "     ${COLOR_BOLD}${alias_line}${COLOR_RESET}"
-          return ;;
+    *)
+      echo -e "   ${symbol_warn} Shell not supported automatically. Please add titanx() manually."
+      return ;;
   esac
-  local tmp
-  tmp="$(mktemp)"
-  grep -v "^alias titanx=" "$ALIAS_RC" 2>/dev/null > "$tmp" || true
-  printf '%s\n' "$alias_line" >> "$tmp"
+
+  local tmp; tmp="$(mktemp)"
+  # Strip any previous titanx alias or function block
+  awk '
+    /^alias titanx=/ { next }
+    /^titanx\(\)/ { skip=1 }
+    skip && /^\}/ { skip=0; next }
+    skip { next }
+    { print }
+  ' "$ALIAS_RC" 2>/dev/null > "$tmp" || true
+
+  cat >> "$tmp" << FUNCEOF
+
+titanx() {
+  local DIR="${target}"
+  local CONF="\$DIR/conf.txt"
+  local agent model version last_updated
+
+  # read conf
+  agent=\$(grep '^AGENT=' "\$CONF" 2>/dev/null | cut -d= -f2)
+  model=\$(grep '^MODEL=' "\$CONF" 2>/dev/null | cut -d= -f2)
+  version=\$(cat "\$DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
+  last_updated=\$(grep '^LAST_UPDATED=' "\$CONF" 2>/dev/null | cut -d= -f2-)
+  agent=\${agent:-claude}
+
+  case "\${1:-}" in
+    -h|--help)
+      echo ""
+      echo "  titanx — Titan Ops Console"
+      echo ""
+      echo "  Usage:"
+      echo "    titanx              open project with \${agent}"
+      echo "    titanx -a/--agent   switch AI agent"
+      echo "    titanx -u/--update  manually pull latest template from S3"
+      echo "    titanx -i/--info    show version, agent, and last update time"
+      echo "    titanx -h/--help    show this help"
+      echo ""
+      ;;
+    -i|--info)
+      echo ""
+      echo "  titanx info"
+      printf "    %-14s %s\n" "Version"      "\${version:-(unknown)}"
+      printf "    %-14s %s\n" "Last updated" "\${last_updated:-(never)}"
+      printf "    %-14s %s\n" "Agent"        "\$agent"
+      printf "    %-14s %s\n" "Project"      "\$DIR"
+      echo ""
+      ;;
+    -u|--update)
+      echo "  Updating titanx..."
+      (cd "\$DIR" && bash update.sh --force)
+      echo "  Done."
+      ;;
+    -a|--agent)
+      echo ""
+      local _agents=("claude:Claude Code" "opencode:OpenCode" "codex:OpenAI Codex" "agy:Antigravity")
+      local _entries=() _labels=()
+      for _pair in "\${_agents[@]}"; do
+        local _bin="\${_pair%%:*}" _label="\${_pair#*:}"
+        command -v "\$_bin" >/dev/null 2>&1 || continue
+        _entries+=("\$_bin"); _labels+=("\$_label")
+      done
+      if [ "\${#_entries[@]}" -eq 0 ]; then
+        echo "  No supported AI agent found in PATH."
+        echo "  Install one of: claude, opencode, codex, agy"
+        echo ""; return
+      fi
+      echo "  Select AI agent:"
+      for _idx in "\${!_entries[@]}"; do
+        local _b="\${_entries[\$_idx]}" _l="\${_labels[\$_idx]}"
+        local _m="  "; [ "\$_b" = "\$agent" ] && _m="➜ "
+        printf "   %s%d) %-12s %s\n" "\$_m" "\$(( _idx + 1 ))" "\$_b" "\$_l"
+      done
+      printf "   Press number to select❯ "
+      local _choice; read -r _choice
+      if [[ "\$_choice" =~ ^[0-9]+\$ ]] && [ "\$_choice" -ge 1 ] && [ "\$_choice" -le "\${#_entries[@]}" ]; then
+        local _new="\${_entries[\$(( _choice - 1 ))]}"
+        if [ -f "\$CONF" ]; then
+          local _tmp; _tmp=\$(mktemp)
+          grep -v '^AGENT=' "\$CONF" > "\$_tmp"
+          printf 'AGENT=%s\n' "\$_new" >> "\$_tmp"
+          cat "\$_tmp" > "\$CONF"; rm -f "\$_tmp"
+        fi
+        echo "  Agent set to: \$_new"
+      else
+        echo "  No change."
+      fi
+      echo ""
+      ;;
+    *)
+      cd "\$DIR" && "\$agent" \${model:+--model "\$model"}
+      ;;
+  esac
+}
+FUNCEOF
+
   cat "$tmp" > "$ALIAS_RC"; rm "$tmp"
 }
 
@@ -211,22 +391,41 @@ else
 fi
 echo
 
-# 2) shell alias --------------------------------------------------------------
-echo -e " ${COLOR_BOLD}Step 2: Shell Integration${COLOR_RESET}"
-set_titanx_alias
+# 2) agent selection + shell function -----------------------------------------
+echo -e " ${COLOR_BOLD}Step 2: AI Agent & Shell Integration${COLOR_RESET}"
+
+# Read current agent from conf.txt if it exists (re-install / --force case)
+current_agent=""
+[ -f "$TARGET/conf.txt" ] && current_agent=$(grep '^AGENT=' "$TARGET/conf.txt" 2>/dev/null | cut -d= -f2)
+
+select_agent "$current_agent"
+write_agent_conf "$SELECTED_AGENT"
+
+set_titanx_function
 if [ -n "$ALIAS_RC" ]; then
-  echo -e "   ${symbol_success} Registered ${COLOR_CYAN}titanx${COLOR_RESET} alias in ${COLOR_CYAN}$ALIAS_RC${COLOR_RESET}"
+  [ "$AGENT_AUTOSELECTED" -eq 0 ] && echo -e "   ${symbol_success} Agent ${COLOR_CYAN}${SELECTED_AGENT}${COLOR_RESET} selected"
+  echo -e "   ${symbol_success} Registered ${COLOR_CYAN}titanx${COLOR_RESET} function in ${COLOR_CYAN}$ALIAS_RC${COLOR_RESET}"
   echo -e "     ${COLOR_GRAY}You can now run: ${COLOR_RESET}source $ALIAS_RC${COLOR_GRAY} (or open a new terminal)${COLOR_RESET}"
 fi
 echo
 
 # 3) preflight ----------------------------------------------------------------
 echo -e " ${COLOR_BOLD}Step 3: Preflight Checks${COLOR_RESET}"
-if have claude; then
-  echo -e "   ${symbol_success} Claude CLI detected"
+agent_install_url() {
+  case "$1" in
+    claude)   echo "$URL_AGENT_CLAUDE" ;;
+    opencode) echo "$URL_AGENT_OPENCODE" ;;
+    codex)    echo "$URL_AGENT_CODEX" ;;
+    agy)      echo "$URL_AGENT_AGY" ;;
+    *)        echo "" ;;
+  esac
+}
+if have "$SELECTED_AGENT"; then
+  echo -e "   ${symbol_success} ${SELECTED_AGENT} detected"
 else
-  echo -e "   ${symbol_error} Claude CLI not found"
-  echo -e "     ${COLOR_RED}Please install Claude Code first: ${COLOR_UNDERLINE}https://claude.ai/code${COLOR_RESET}"
+  url=$(agent_install_url "$SELECTED_AGENT")
+  echo -e "   ${symbol_error} ${SELECTED_AGENT} not found"
+  [ -n "$url" ] && echo -e "     ${COLOR_RED}Please install it: ${COLOR_UNDERLINE}${url}${COLOR_RESET}"
 fi
 
 if have curl; then
@@ -251,8 +450,6 @@ need_env_grafana=0
 need_env_sentry=0
 
 MCP_JSON="$TARGET/.mcp.json"
-CLI_PREFERRED_DOC="https://www.anthropic.com/engineering/code-execution-with-mcp"
-
 fetch_tokens
 write_project_mcp_json "$MCP_JSON"
 
@@ -266,12 +463,12 @@ padded_grafana=$(printf "%-14s" "Grafana")
 if have gcx; then
   echo -e "   ${symbol_success} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} CLI (${COLOR_GREEN}gcx${COLOR_RESET})"
 elif mcp_present "grafana"; then
-  echo -e "   ${symbol_warn} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}grafana${COLOR_RESET}) — install gcx: ${COLOR_UNDERLINE}https://github.com/grafana/gcx${COLOR_RESET}"
-  echo -e "                  ${COLOR_GRAY}Endpoint: grafana.eks.ops.titan.email · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}GRAFANA_TOKEN"
+  echo -e "   ${symbol_warn} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}grafana${COLOR_RESET}) — install gcx: ${COLOR_UNDERLINE}${URL_GCX}${COLOR_RESET}"
+  echo -e "                  ${COLOR_GRAY}Endpoint: ${GRAFANA_ENDPOINT} · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}GRAFANA_TOKEN"
   mcp_used=1; need_env_grafana=1
 else
-  echo -e "   ${symbol_warn} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} not found — install gcx: ${COLOR_UNDERLINE}https://github.com/grafana/gcx${COLOR_RESET}"
-  echo -e "                  ${COLOR_GRAY}Endpoint: grafana.eks.ops.titan.email · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}GRAFANA_TOKEN"
+  echo -e "   ${symbol_warn} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} not found — install gcx: ${COLOR_UNDERLINE}${URL_GCX}${COLOR_RESET}"
+  echo -e "                  ${COLOR_GRAY}Endpoint: ${GRAFANA_ENDPOINT} · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}GRAFANA_TOKEN"
   need_env_grafana=1
 fi
 
@@ -279,12 +476,12 @@ padded_sentry=$(printf "%-14s" "Sentry")
 if have sentry; then
   echo -e "   ${symbol_success} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} CLI (${COLOR_GREEN}sentry${COLOR_RESET})"
 elif mcp_present "sentry"; then
-  echo -e "   ${symbol_warn} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}sentry${COLOR_RESET}) — install sentry CLI: ${COLOR_UNDERLINE}https://cli.sentry.dev${COLOR_RESET}"
-  echo -e "                  ${COLOR_GRAY}Endpoint: sentry.eks.ops.titan.email · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}SENTRY_AUTH_TOKEN"
+  echo -e "   ${symbol_warn} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}sentry${COLOR_RESET}) — install sentry CLI: ${COLOR_UNDERLINE}${URL_SENTRY_CLI}${COLOR_RESET}"
+  echo -e "                  ${COLOR_GRAY}Endpoint: ${SENTRY_ENDPOINT} · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}SENTRY_AUTH_TOKEN"
   mcp_used=1; need_env_sentry=1
 else
-  echo -e "   ${symbol_warn} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} not found — install sentry CLI: ${COLOR_UNDERLINE}https://cli.sentry.dev${COLOR_RESET}"
-  echo -e "                  ${COLOR_GRAY}Endpoint: sentry.eks.ops.titan.email · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}SENTRY_AUTH_TOKEN"
+  echo -e "   ${symbol_warn} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} not found — install sentry CLI: ${COLOR_UNDERLINE}${URL_SENTRY_CLI}${COLOR_RESET}"
+  echo -e "                  ${COLOR_GRAY}Endpoint: ${SENTRY_ENDPOINT} · token → ${COLOR_RESET}$TARGET/.env ${COLOR_GRAY}as ${COLOR_RESET}SENTRY_AUTH_TOKEN"
   need_env_sentry=1
 fi
 
@@ -301,11 +498,11 @@ padded_k8s=$(printf "%-14s" "Kubernetes")
 if have kubectl; then
   echo -e "   ${symbol_success} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} CLI (${COLOR_GREEN}kubectl${COLOR_RESET})"
 elif mcp_present "kubernetes"; then
-  echo -e "   ${symbol_warn} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}kubernetes${COLOR_RESET}) — install kubectl: ${COLOR_UNDERLINE}https://kubernetes.io/docs/tasks/tools${COLOR_RESET}"
+  echo -e "   ${symbol_warn} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}kubernetes${COLOR_RESET}) — install kubectl: ${COLOR_UNDERLINE}${URL_KUBECTL}${COLOR_RESET}"
   mcp_used=1
 else
   echo -e "   ${symbol_error} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} ${COLOR_RED}MISSING (REQUIRED)${COLOR_RESET}"
-  echo -e "                  Install kubectl: ${COLOR_UNDERLINE}https://kubernetes.io/docs/tasks/tools${COLOR_RESET}"
+  echo -e "                  Install kubectl: ${COLOR_UNDERLINE}${URL_KUBECTL}${COLOR_RESET}"
   missing_required=1
 fi
 
@@ -313,11 +510,11 @@ padded_code=$(printf "%-14s" "Code")
 if have gh; then
   echo -e "   ${symbol_success} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} CLI (${COLOR_GREEN}gh${COLOR_RESET})"
 elif mcp_present "github"; then
-  echo -e "   ${symbol_warn} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}github${COLOR_RESET}) — install gh CLI: ${COLOR_UNDERLINE}https://cli.github.com${COLOR_RESET}"
+  echo -e "   ${symbol_warn} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}github${COLOR_RESET}) — install gh CLI: ${COLOR_UNDERLINE}${URL_GH_CLI}${COLOR_RESET}"
   mcp_used=1
 else
   echo -e "   ${symbol_error} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} ${COLOR_RED}MISSING (REQUIRED)${COLOR_RESET}"
-  echo -e "                  Install gh CLI: ${COLOR_UNDERLINE}https://cli.github.com${COLOR_RESET}${COLOR_GRAY}, then run ${COLOR_RESET}gh auth login"
+  echo -e "                  Install gh CLI: ${COLOR_UNDERLINE}${URL_GH_CLI}${COLOR_RESET}${COLOR_GRAY}, then run ${COLOR_RESET}gh auth login"
   missing_required=1
 fi
 
@@ -332,7 +529,7 @@ fi
 if [ "$mcp_used" -eq 1 ]; then
   echo
   echo -e "   ${symbol_info} ${COLOR_YELLOW}CLIs use far fewer tokens than MCPs for the same tasks${COLOR_RESET}"
-  echo -e "     ${COLOR_UNDERLINE}${CLI_PREFERRED_DOC}${COLOR_RESET}"
+  echo -e "     ${COLOR_UNDERLINE}${URL_CLI_PREFERRED_DOC}${COLOR_RESET}"
 fi
 echo
 
@@ -351,17 +548,19 @@ fi
 
 echo -e "\n ${COLOR_BOLD}Quick Start:${COLOR_RESET}"
 if [ -n "$ALIAS_RC" ]; then
-  echo -e "   1. Activate the alias:"
+  echo -e "   1. Activate the shell function:"
   echo -e "      ${COLOR_CYAN}source $ALIAS_RC${COLOR_RESET}"
-  echo -e "   2. Jump to your project and start Claude:"
-  echo -e "      ${COLOR_CYAN}titanx && claude${COLOR_RESET}"
+  echo -e "   2. Open titanx:"
+  echo -e "      ${COLOR_CYAN}titanx${COLOR_RESET}"
+  echo -e "   3. Sample questions to get started:"
+  echo -e "      ${COLOR_UNDERLINE}${URL_SAMPLE_QUESTIONS}${COLOR_RESET}"
 else
-  echo -e "   1. Go to your project and start Claude:"
-  echo -e "      ${COLOR_CYAN}cd \"$TARGET\" && claude${COLOR_RESET}"
+  echo -e "   1. Go to your project and start ${SELECTED_AGENT}:"
+  echo -e "      ${COLOR_CYAN}cd \"$TARGET\" && ${SELECTED_AGENT}${COLOR_RESET}"
+  echo -e "   2. Sample questions to get started:"
+  echo -e "      ${COLOR_UNDERLINE}${URL_SAMPLE_QUESTIONS}${COLOR_RESET}"
 fi
-echo -e "   3. Sample questions to get started:"
-echo -e "      ${COLOR_UNDERLINE}https://github.com/talk-to/ops-mcp#sample-questions-to-ask${COLOR_RESET}"
 
 echo -e "\n ${COLOR_BOLD}Companion docs & setup:${COLOR_RESET}"
-echo -e "   ${COLOR_UNDERLINE}https://github.com/talk-to/ops-mcp/tree/main#companion-mcps${COLOR_RESET}"
+echo -e "   ${COLOR_UNDERLINE}${URL_COMPANION_DOCS}${COLOR_RESET}"
 echo
