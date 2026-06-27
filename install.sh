@@ -54,18 +54,18 @@ for a in "$@"; do
 done
 
 # Color Definitions (using 256-color palette for premium aesthetics)
-COLOR_BOLD="\033[1m"
-COLOR_DIM="\033[2m"
-COLOR_UNDERLINE="\033[4m"
-COLOR_RESET="\033[0m"
+COLOR_BOLD=$'\e[1m'
+COLOR_DIM=$'\e[2m'
+COLOR_UNDERLINE=$'\e[4m'
+COLOR_RESET=$'\e[0m'
 
-COLOR_GREEN="\033[38;5;84m"     # Vibrant pastel green
-COLOR_YELLOW="\033[38;5;220m"   # Warm gold/yellow
-COLOR_RED="\033[38;5;203m"      # Warm pastel red
-COLOR_CYAN="\033[38;5;86m"       # Turquoise/Cyan
-COLOR_BLUE="\033[38;5;39m"       # Vivid deep blue
-COLOR_PURPLE="\033[38;5;141m"   # Soft purple/magenta
-COLOR_GRAY="\033[38;5;244m"     # Neutral gray
+COLOR_GREEN=$'\e[38;5;84m'     # Vibrant pastel green
+COLOR_YELLOW=$'\e[38;5;220m'   # Warm gold/yellow
+COLOR_RED=$'\e[38;5;203m'      # Warm pastel red
+COLOR_CYAN=$'\e[38;5;86m'       # Turquoise/Cyan
+COLOR_BLUE=$'\e[38;5;39m'       # Vivid deep blue
+COLOR_PURPLE=$'\e[38;5;141m'   # Soft purple/magenta
+COLOR_GRAY=$'\e[38;5;244m'     # Neutral gray
 
 symbol_success="${COLOR_GREEN}✔${COLOR_RESET}"
 symbol_warn="${COLOR_YELLOW}⚠${COLOR_RESET}"
@@ -208,7 +208,7 @@ select_agent() {
     local bin="${entries[$idx]}" label="${labels[$idx]}"
     local marker="  "
     [ "$bin" = "$current" ] && marker="${COLOR_PURPLE}➜${COLOR_RESET} "
-    printf "   %b%d) %-12s ${COLOR_GRAY}%s${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
+    printf "   %s%d) %-12s ${COLOR_GRAY}%s${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
   done
   printf "   ${COLOR_GRAY}Press number to select❯${COLOR_RESET} "
   local choice
