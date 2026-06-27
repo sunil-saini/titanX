@@ -331,9 +331,8 @@ titanx() {
       fi
 
       echo "  Select AI agent:"
-      local _i=1
+      local _i=1 _b _l _m
       while [ "$_i" -le "$_count" ]; do
-        local _b _l _m
         eval "_b=\${_bin_${_i}}"
         eval "_l=\${_label_${_i}}"
         _m="  "
