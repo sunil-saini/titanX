@@ -232,8 +232,7 @@ write_agent_conf() {
   fi
 }
 
-# set_titanx_function writes the titanx shell function to the user's rc file.
-# The function reads AGENT and other settings from conf.txt at call time.
+# set_titanx_function writes the titanx shell function to a script and sources it in user's rc file.
 set_titanx_function() {
   local target="$TARGET"
   case "${SHELL##*/}" in
@@ -244,37 +243,42 @@ set_titanx_function() {
       return ;;
   esac
 
-  local tmp; tmp="$(mktemp)"
-  # Strip any previous titanx alias or function block
-  awk '
-    /^alias titanx=/ { next }
-    /^titanx\(\)/ { skip=1 }
-    skip && /^\}/ { skip=0; next }
-    skip { next }
-    { print }
-  ' "$ALIAS_RC" 2>/dev/null > "$tmp" || true
+  # Write the titanx.sh script to the target directory
+  cat > "$target/titanx.sh" << 'SH_EOF'
+# titanx shell integration — sourced from shell RC
 
-  cat >> "$tmp" << FUNCEOF
+# Determine directory of this sourced script dynamically
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  _TITANX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  _TITANX_DIR="$(cd "$(dirname "${(%):-%x}")" && pwd)"
+else
+  _TITANX_DIR=""
+fi
 
 titanx() {
-  local DIR="${target}"
-  local CONF="\$DIR/conf.txt"
+  local DIR="${_TITANX_DIR:-}"
+  if [ -z "$DIR" ]; then
+    echo "Error: Could not resolve titanx project directory." >&2
+    return 1
+  fi
+  local CONF="$DIR/conf.txt"
   local agent model version last_updated
 
   # read conf
-  agent=\$(grep '^AGENT=' "\$CONF" 2>/dev/null | cut -d= -f2)
-  model=\$(grep '^MODEL=' "\$CONF" 2>/dev/null | cut -d= -f2)
-  version=\$(cat "\$DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
-  last_updated=\$(grep '^LAST_UPDATED=' "\$CONF" 2>/dev/null | cut -d= -f2-)
-  agent=\${agent:-claude}
+  agent=$(grep '^AGENT=' "$CONF" 2>/dev/null | cut -d= -f2)
+  model=$(grep '^MODEL=' "$CONF" 2>/dev/null | cut -d= -f2)
+  version=$(cat "$DIR/version.txt" 2>/dev/null | tr -d '[:space:]')
+  last_updated=$(grep '^LAST_UPDATED=' "$CONF" 2>/dev/null | cut -d= -f2-)
+  agent=${agent:-claude}
 
-  case "\${1:-}" in
+  case "${1:-}" in
     -h|--help)
       echo ""
       echo "  titanx — Titan Ops Console"
       echo ""
       echo "  Usage:"
-      echo "    titanx              open project with \${agent}"
+      echo "    titanx              open project with ${agent}"
       echo "    titanx -a/--agent   switch AI agent"
       echo "    titanx -u/--update  manually pull latest template from S3"
       echo "    titanx -i/--info    show version, agent, and last update time"
@@ -284,58 +288,107 @@ titanx() {
     -i|--info)
       echo ""
       echo "  titanx info"
-      printf "    %-14s %s\n" "Version"      "\${version:-(unknown)}"
-      printf "    %-14s %s\n" "Last updated" "\${last_updated:-(never)}"
-      printf "    %-14s %s\n" "Agent"        "\$agent"
-      printf "    %-14s %s\n" "Project"      "\$DIR"
+      printf "    %-14s %s\n" "Version"      "${version:-(unknown)}"
+      printf "    %-14s %s\n" "Last updated" "${last_updated:-(never)}"
+      printf "    %-14s %s\n" "Agent"        "$agent"
+      printf "    %-14s %s\n" "Project"      "$DIR"
       echo ""
       ;;
     -u|--update)
       echo "  Updating titanx..."
-      (cd "\$DIR" && bash update.sh --force)
+      (cd "$DIR" && bash update.sh --force)
       echo "  Done."
       ;;
     -a|--agent)
       echo ""
-      local _agents=("claude:Claude Code" "opencode:OpenCode" "codex:OpenAI Codex" "agy:Antigravity")
-      local _entries=() _labels=()
-      for _pair in "\${_agents[@]}"; do
-        local _bin="\${_pair%%:*}" _label="\${_pair#*:}"
-        command -v "\$_bin" >/dev/null 2>&1 || continue
-        _entries+=("\$_bin"); _labels+=("\$_label")
-      done
-      if [ "\${#_entries[@]}" -eq 0 ]; then
+      local _count=0
+      if command -v claude >/dev/null 2>&1; then
+        _count=$((_count + 1))
+        eval "_bin_${_count}=claude"
+        eval "_label_${_count}='Claude Code'"
+      fi
+      if command -v opencode >/dev/null 2>&1; then
+        _count=$((_count + 1))
+        eval "_bin_${_count}=opencode"
+        eval "_label_${_count}='OpenCode'"
+      fi
+      if command -v codex >/dev/null 2>&1; then
+        _count=$((_count + 1))
+        eval "_bin_${_count}=codex"
+        eval "_label_${_count}='OpenAI Codex'"
+      fi
+      if command -v agy >/dev/null 2>&1; then
+        _count=$((_count + 1))
+        eval "_bin_${_count}=agy"
+        eval "_label_${_count}='Antigravity'"
+      fi
+
+      if [ "$_count" -eq 0 ]; then
         echo "  No supported AI agent found in PATH."
         echo "  Install one of: claude, opencode, codex, agy"
-        echo ""; return
+        echo ""
+        return
       fi
+
       echo "  Select AI agent:"
-      for _idx in "\${!_entries[@]}"; do
-        local _b="\${_entries[\$_idx]}" _l="\${_labels[\$_idx]}"
-        local _m="  "; [ "\$_b" = "\$agent" ] && _m="➜ "
-        printf "   %s%d) %-12s %s\n" "\$_m" "\$(( _idx + 1 ))" "\$_b" "\$_l"
+      local _i=1
+      while [ "$_i" -le "$_count" ]; do
+        local _b _l _m
+        eval "_b=\${_bin_${_i}}"
+        eval "_l=\${_label_${_i}}"
+        _m="  "
+        [ "$_b" = "$agent" ] && _m="➜ "
+        printf "   %s%d) %-12s %s\n" "$_m" "$_i" "$_b" "$_l"
+        _i=$((_i + 1))
       done
+
       printf "   Press number to select❯ "
       local _choice; read -r _choice
-      if [[ "\$_choice" =~ ^[0-9]+\$ ]] && [ "\$_choice" -ge 1 ] && [ "\$_choice" -le "\${#_entries[@]}" ]; then
-        local _new="\${_entries[\$(( _choice - 1 ))]}"
-        if [ -f "\$CONF" ]; then
-          local _tmp; _tmp=\$(mktemp)
-          grep -v '^AGENT=' "\$CONF" > "\$_tmp"
-          printf 'AGENT=%s\n' "\$_new" >> "\$_tmp"
-          cat "\$_tmp" > "\$CONF"; rm -f "\$_tmp"
-        fi
-        echo "  Agent set to: \$_new"
-      else
-        echo "  No change."
-      fi
+      case "$_choice" in
+        *[!0-9]*|"")
+          echo "  No change."
+          ;;
+        *)
+          if [ "$_choice" -ge 1 ] && [ "$_choice" -le "$_count" ]; then
+            local _new
+            eval "_new=\${_bin_${_choice}}"
+            if [ -f "$CONF" ]; then
+              local _tmp; _tmp=$(mktemp)
+              grep -v '^AGENT=' "$CONF" > "$_tmp"
+              printf 'AGENT=%s\n' "$_new" >> "$_tmp"
+              cat "$_tmp" > "$CONF"; rm -f "$_tmp"
+            fi
+            echo "  Agent set to: $_new"
+          else
+            echo "  No change."
+          fi
+          ;;
+      esac
       echo ""
       ;;
     *)
-      cd "\$DIR" && "\$agent" \${model:+--model "\$model"}
+      cd "$DIR" && "$agent" ${model:+--model "$model"}
       ;;
   esac
 }
+SH_EOF
+
+  local tmp; tmp="$(mktemp)"
+  # Strip any previous titanx alias, function block, or titanx.sh source lines
+  awk '
+    /^alias titanx=/ { next }
+    /titanx\.sh/ { next }
+    /^titanx\(\)/ { skip=1 }
+    skip && /^\}/ { skip=0; next }
+    skip { next }
+    { print }
+  ' "$ALIAS_RC" 2>/dev/null > "$tmp" || true
+
+  # Append shell integration sourcing line
+  cat >> "$tmp" << FUNCEOF
+
+# titanx shell integration
+[ -f "${target}/titanx.sh" ] && source "${target}/titanx.sh"
 FUNCEOF
 
   cat "$tmp" > "$ALIAS_RC"; rm "$tmp"
