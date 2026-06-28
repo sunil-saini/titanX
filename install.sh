@@ -203,14 +203,14 @@ select_agent() {
     return
   fi
 
-  echo -e " ${COLOR_BOLD}Select AI Agent:${COLOR_RESET}"
+  echo -e "   ${COLOR_BOLD}Select AI Agent:${COLOR_RESET}"
   for idx in "${!entries[@]}"; do
     local bin="${entries[$idx]}" label="${labels[$idx]}"
-    local marker="  "
-    [ "$bin" = "$current" ] && marker="${COLOR_PURPLE}➜${COLOR_RESET} "
-    printf "   %s%d) %-12s ${COLOR_GRAY}%s${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
+    local marker="    "
+    [ "$bin" = "$current" ] && marker="  ${COLOR_PURPLE}➜${COLOR_RESET} "
+    printf "     %s%d) %-12s ${COLOR_GRAY}%s${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
   done
-  printf "   ${COLOR_GRAY}Press number to select❯${COLOR_RESET} "
+  printf "     ${COLOR_GRAY}Press number to select❯${COLOR_RESET} "
   local choice
   read -r choice </dev/tty
   if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#entries[@]}" ]; then
@@ -280,20 +280,22 @@ titanx() {
       echo "  titanx — Titan Ops Console"
       echo ""
       echo "  Usage:"
-      echo "    titanx              open project with ${agent}"
-      echo "    titanx -a/--agent   switch AI agent"
-      echo "    titanx -u/--update  manually pull latest template from S3"
-      echo "    titanx -i/--info    show version, agent, and last update time"
-      echo "    titanx -h/--help    show this help"
+      echo "    titanx                   open project with ${agent}"
+      echo "    titanx -a/--agent        switch AI agent"
+      echo "    titanx -u/--update       manually pull latest template from S3"
+      echo "    titanx -i/--info         show version, agent, and last update time"
+      echo "    titanx -x/--uninstall    remove titanx from this system"
+      echo "    titanx -h/--help         show this help"
       echo ""
       ;;
     -i|--info)
       echo ""
       echo "  titanx info"
-      printf "    %-14s %s\n" "Version"      "${version:-(unknown)}"
-      printf "    %-14s %s\n" "Last updated" "${last_updated:-(never)}"
-      printf "    %-14s %s\n" "Agent"        "$agent"
-      printf "    %-14s %s\n" "Project"      "$PROJECT_DIR"
+      echo "  ${COLOR_GRAY}────────────────────${COLOR_RESET}"
+      printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Version" "${version:-(unknown)}"
+      printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Agent"   "$agent"
+      printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Updated" "${last_updated:-(never)}"
+      printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Project" "$PROJECT_DIR"
       echo ""
       ;;
     -u|--update)
@@ -365,6 +367,31 @@ titanx() {
           fi
           ;;
       esac
+      echo ""
+      ;;
+    -x|--uninstall)
+      echo ""
+      echo "  Uninstalling titanx..."
+      local rc_file=""
+      case "${SHELL##*/}" in
+        zsh)  rc_file="$HOME/.zshrc" ;;
+        bash) rc_file="$HOME/.bashrc" ;;
+      esac
+      if [ -n "$rc_file" ] && [ -f "$rc_file" ]; then
+        local tmp; tmp=$(mktemp)
+        grep -v "titanx\.sh" "$rc_file" > "$tmp"
+        cat "$tmp" > "$rc_file"; rm -f "$tmp"
+        echo "  Removed shell integration from $rc_file"
+      fi
+      if [ -d "$DIR" ]; then
+        rm -rf "$DIR"
+        echo "  Removed $DIR"
+      fi
+      if [ "$PROJECT_DIR" != "$DIR" ] && [ -d "$PROJECT_DIR" ]; then
+        echo "  Project directory preserved at $PROJECT_DIR"
+        echo "  Remove it manually: rm -rf $PROJECT_DIR"
+      fi
+      echo "  titanx uninstalled. Restart your shell or run: exec ${SHELL##*/}"
       echo ""
       ;;
     *)
