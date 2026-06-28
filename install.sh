@@ -257,6 +257,14 @@ else
   _TITANX_DIR=""
 fi
 
+# Color definitions (same palette as install.sh)
+COLOR_RESET=$'\e[0m'
+COLOR_BOLD=$'\e[1m'
+COLOR_GREEN=$'\e[38;5;84m'
+COLOR_YELLOW=$'\e[38;5;220m'
+COLOR_RED=$'\e[38;5;203m'
+COLOR_GRAY=$'\e[38;5;244m'
+
 titanx() {
   local DIR="${_TITANX_DIR:-}"
   if [ -z "$DIR" ]; then
@@ -292,6 +300,7 @@ titanx() {
     -i|--info)
       echo ""
       echo "  titanx info"
+      echo ""
       printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Version" "${version:-(unknown)}"
       printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Agent"   "$agent"
       printf "  ${COLOR_BOLD}%-10s${COLOR_RESET} %s\n" "Updated" "${last_updated:-(never)}"
