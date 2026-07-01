@@ -96,19 +96,56 @@ if have claude; then
   CLAUDE_MCP_PID=$!
 fi
 
+CODEX_MCP_LIST_FILE="/tmp/codex_mcp_list_$$"
+CODEX_MCP_PID=""
+if have codex; then
+  CLEANUP_FILES+=("$CODEX_MCP_LIST_FILE")
+  codex mcp list 2>/dev/null > "$CODEX_MCP_LIST_FILE" &
+  CODEX_MCP_PID=$!
+fi
+
+OPENCODE_MCP_LIST_FILE="/tmp/opencode_mcp_list_$$"
+OPENCODE_MCP_PID=""
+if have opencode; then
+  CLEANUP_FILES+=("$OPENCODE_MCP_LIST_FILE")
+  opencode mcp list 2>/dev/null > "$OPENCODE_MCP_LIST_FILE" &
+  OPENCODE_MCP_PID=$!
+fi
+
 # mcp_present checks the user-level MCP list (captured at startup).
-# Scoped only to Claude; for other agents (like agy), we fall back to writing
-# to .mcp.json so the project is self-contained out-of-the-box.
+# Scoped to Claude, Codex, and OpenCode; for other agents (like agy), we fall back to writing
+# to project-level config so the project is self-contained out-of-the-box.
 mcp_present(){
-  if [ "${SELECTED_AGENT:-}" != "claude" ]; then
-    return 1
-  fi
-  if [ -n "$CLAUDE_MCP_PID" ]; then
-    wait "$CLAUDE_MCP_PID" 2>/dev/null || true
-    CLAUDE_MCP_PID=""
-  fi
-  if [ -f "$MCP_LIST_FILE" ]; then
-    grep -qiw "$1" "$MCP_LIST_FILE"
+  if [ "${SELECTED_AGENT:-}" = "claude" ]; then
+    if [ -n "$CLAUDE_MCP_PID" ]; then
+      wait "$CLAUDE_MCP_PID" 2>/dev/null || true
+      CLAUDE_MCP_PID=""
+    fi
+    if [ -f "$MCP_LIST_FILE" ]; then
+      grep -qiw "$1" "$MCP_LIST_FILE"
+    else
+      return 1
+    fi
+  elif [ "${SELECTED_AGENT:-}" = "codex" ]; then
+    if [ -n "$CODEX_MCP_PID" ]; then
+      wait "$CODEX_MCP_PID" 2>/dev/null || true
+      CODEX_MCP_PID=""
+    fi
+    if [ -f "$CODEX_MCP_LIST_FILE" ]; then
+      grep -qiw "$1" "$CODEX_MCP_LIST_FILE"
+    else
+      return 1
+    fi
+  elif [ "${SELECTED_AGENT:-}" = "opencode" ]; then
+    if [ -n "$OPENCODE_MCP_PID" ]; then
+      wait "$OPENCODE_MCP_PID" 2>/dev/null || true
+      OPENCODE_MCP_PID=""
+    fi
+    if [ -f "$OPENCODE_MCP_LIST_FILE" ]; then
+      grep -qiw "$1" "$OPENCODE_MCP_LIST_FILE"
+    else
+      return 1
+    fi
   else
     return 1
   fi
@@ -193,6 +230,37 @@ write_project_mcp_json(){
 ' "$OPS_MCP_URL" "$extra_servers" > "$path"
 }
 
+# write_project_codex_toml writes the project .codex/config.toml.
+# Injects ops-mcp, and optionally grafana/sentry MCP server configs in TOML format.
+write_project_codex_toml(){
+  local path="$1" add_grafana="${2:-0}" add_sentry="${3:-0}"
+  mkdir -p "$(dirname "$path")"
+
+  {
+    printf '[mcp_servers.ops-mcp]\nurl = "%s"\n' "$OPS_MCP_URL"
+
+    if [ "$add_grafana" -eq 1 ]; then
+      local grafana_token
+      if [ -n "$TITANX_GRAFANA_TOKEN" ]; then
+        grafana_token="$TITANX_GRAFANA_TOKEN"
+      else
+        grafana_token="<ask in #devops-tooling>"
+      fi
+      printf '\n[mcp_servers.grafana]\ncommand = "uvx"\nargs = [\n  "mcp-grafana"\n]\nenv = { GRAFANA_URL = "%s", GRAFANA_SERVICE_ACCOUNT_TOKEN = "%s" }\n' "$GRAFANA_ENDPOINT" "$grafana_token"
+    fi
+
+    if [ "$add_sentry" -eq 1 ]; then
+      local sentry_token
+      if [ -n "$TITANX_SENTRY_TOKEN" ]; then
+        sentry_token="$TITANX_SENTRY_TOKEN"
+      else
+        sentry_token="<ask in #devops-tooling>"
+      fi
+      printf '\n[mcp_servers.sentry]\ncommand = "npx"\nargs = [\n  "-y",\n  "@sentry/mcp-server@latest"\n]\nenv = { SENTRY_HOST = "%s", SENTRY_ACCESS_TOKEN = "%s" }\n' "$SENTRY_HOST" "$sentry_token"
+    fi
+  } > "$path"
+}
+
 # write_env_file path [inc_grafana=1] [inc_sentry=1]
 # Written only when gcx or sentry CLI is absent; skips a section when flag=0.
 # gcx reads GRAFANA_TOKEN; sentry CLI reads SENTRY_AUTH_TOKEN.
@@ -241,22 +309,31 @@ SELECTED_AGENT=""
 AGENT_AUTOSELECTED=0
 select_agent() {
   local current="${1:-}"
-  local i=1 entries=() labels=()
+  local entries=() labels=() installed=()
+  local total_installed=0
+  local first_installed=""
+
   for pair in "${TITANX_AGENTS[@]}"; do
     local bin="${pair%%:*}" label="${pair#*:}"
-    have "$bin" || continue
     entries+=("$bin")
     labels+=("$label")
+    if have "$bin"; then
+      installed+=(1)
+      ((total_installed++))
+      [ -z "$first_installed" ] && first_installed="$bin"
+    else
+      installed+=(0)
+    fi
   done
 
-  if [ "${#entries[@]}" -eq 0 ]; then
+  if [ "$total_installed" -eq 0 ]; then
     echo -e "   ${symbol_error} ${COLOR_RED}No supported AI agent found in PATH.${COLOR_RESET}"
     echo -e "     Install one of: claude, opencode, codex, agy — then re-run install.sh"
     exit 1
   fi
 
-  if [ "${#entries[@]}" -eq 1 ]; then
-    SELECTED_AGENT="${entries[0]}"
+  if [ "$total_installed" -eq 1 ] && [ -z "$current" ]; then
+    SELECTED_AGENT="$first_installed"
     AGENT_AUTOSELECTED=1
     echo -e "   ${symbol_success} AI agent: ${COLOR_CYAN}${SELECTED_AGENT}${COLOR_RESET} ${COLOR_GRAY}(only available agent)${COLOR_RESET}"
     echo
@@ -265,29 +342,51 @@ select_agent() {
 
   echo -e "   ${COLOR_BOLD}Select AI Agent:${COLOR_RESET}"
   for idx in "${!entries[@]}"; do
-    local bin="${entries[$idx]}" label="${labels[$idx]}"
+    local bin="${entries[$idx]}" label="${labels[$idx]}" is_inst="${installed[$idx]}"
     local marker="    "
     [ "$bin" = "$current" ] && marker="  ${COLOR_PURPLE}➜${COLOR_RESET} "
-    printf "     %s%d) %-12s ${COLOR_GRAY}%s${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
+    
+    if [ "$is_inst" -eq 1 ]; then
+      printf "     %s%d) %-12s ${COLOR_RESET}%s\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
+    else
+      printf "     %s${COLOR_GRAY}%d) %-12s %s (not installed)${COLOR_RESET}\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
+    fi
   done
-  printf "     ${COLOR_GRAY}Press number to select❯${COLOR_RESET} "
-  local choice
-  read -r choice </dev/tty
-  if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#entries[@]}" ]; then
-    SELECTED_AGENT="${entries[$((choice-1))]}"
-  else
-    SELECTED_AGENT="${current:-${entries[0]}}"
-  fi
+
+  while true; do
+    printf "     ${COLOR_GRAY}Press number to select❯${COLOR_RESET} "
+    local choice
+    read -r choice </dev/tty
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#entries[@]}" ]; then
+      local selected_idx=$((choice-1))
+      if [ "${installed[$selected_idx]}" -eq 1 ]; then
+        SELECTED_AGENT="${entries[$selected_idx]}"
+        break
+      else
+        echo -e "     ${COLOR_RED}Agent '${entries[$selected_idx]}' is not installed. Please choose an installed agent.${COLOR_RESET}"
+      fi
+    else
+      # Default fallback
+      if [ -n "$current" ] && have "$current"; then
+        SELECTED_AGENT="$current"
+      else
+        SELECTED_AGENT="$first_installed"
+      fi
+      break
+    fi
+  done
   echo
 }
 
-# write_agent_conf writes/updates AGENT in conf.txt.
+# write_agent_conf writes/updates AGENT and tokens in conf.txt.
 write_agent_conf() {
   local agent="$1" conf="$HOME/.titanx/conf.txt"
   if [ -f "$conf" ]; then
     local tmp; tmp="$(mktemp)"
-    grep -v '^AGENT=' "$conf" > "$tmp"
+    grep -v -e '^AGENT=' -e '^GRAFANA_TOKEN=' -e '^SENTRY_TOKEN=' "$conf" > "$tmp" || true
     printf 'AGENT=%s\n' "$agent" >> "$tmp"
+    [ -n "${TITANX_GRAFANA_TOKEN:-}" ] && printf 'GRAFANA_TOKEN=%s\n' "$TITANX_GRAFANA_TOKEN" >> "$tmp"
+    [ -n "${TITANX_SENTRY_TOKEN:-}" ] && printf 'SENTRY_TOKEN=%s\n' "$TITANX_SENTRY_TOKEN" >> "$tmp"
     cat "$tmp" > "$conf"; rm -f "$tmp"
   fi
 }
@@ -374,68 +473,74 @@ titanx() {
       ;;
     -a|--agent)
       echo ""
-      local _count=0
-      if command -v claude >/dev/null 2>&1; then
-        _count=$((_count + 1))
-        eval "_bin_${_count}=claude"
-        eval "_label_${_count}='Claude Code'"
-      fi
-      if command -v opencode >/dev/null 2>&1; then
-        _count=$((_count + 1))
-        eval "_bin_${_count}=opencode"
-        eval "_label_${_count}='OpenCode'"
-      fi
-      if command -v codex >/dev/null 2>&1; then
-        _count=$((_count + 1))
-        eval "_bin_${_count}=codex"
-        eval "_label_${_count}='OpenAI Codex'"
-      fi
-      if command -v agy >/dev/null 2>&1; then
-        _count=$((_count + 1))
-        eval "_bin_${_count}=agy"
-        eval "_label_${_count}='Antigravity'"
-      fi
+      local _entries=("claude" "opencode" "codex" "agy")
+      local _labels=("Claude Code" "OpenCode" "OpenAI Codex" "Antigravity")
+      local _installed=() _total_installed=0 _first_installed=""
 
-      if [ "$_count" -eq 0 ]; then
+      for _i in "${!_entries[@]}"; do
+        local _bin="${_entries[$_i]}"
+        if command -v "$_bin" >/dev/null 2>&1; then
+          _installed+=(1)
+          ((_total_installed++))
+          [ -z "$_first_installed" ] && _first_installed="$_bin"
+        else
+          _installed+=(0)
+        fi
+      done
+
+      if [ "$_total_installed" -eq 0 ]; then
         echo "  No supported AI agent found in PATH."
         echo "  Install one of: claude, opencode, codex, agy"
         echo ""
-        return
+        return 1
       fi
 
       echo "  Select AI agent:"
-      local _i=1 _b _l _m
-      while [ "$_i" -le "$_count" ]; do
-        eval "_b=\${_bin_${_i}}"
-        eval "_l=\${_label_${_i}}"
-        _m="  "
-        [ "$_b" = "$agent" ] && _m="➜ "
-        printf "   %s%d) %-12s %s\n" "$_m" "$_i" "$_b" "$_l"
-        _i=$((_i + 1))
+      for _i in "${!_entries[@]}"; do
+        local _bin="${_entries[$_i]}" _lbl="${_labels[$_i]}" _is_inst="${_installed[$_i]}"
+        local _marker="    "
+        [ "$_bin" = "$agent" ] && _marker="➜   "
+        
+        if [ "$_is_inst" -eq 1 ]; then
+          printf "   %s%d) %-12s %s\n" "$_marker" "$(( _i + 1 ))" "$_bin" "$_lbl"
+        else
+          printf "   %s${COLOR_GRAY}%d) %-12s %s (not installed)${COLOR_RESET}\n" "$_marker" "$(( _i + 1 ))" "$_bin" "$_lbl"
+        fi
       done
 
-      printf "   Press number to select❯ "
-      local _choice; read -r _choice
-      case "$_choice" in
-        *[!0-9]*|"")
-          echo "  No change."
-          ;;
-        *)
-          if [ "$_choice" -ge 1 ] && [ "$_choice" -le "$_count" ]; then
-            local _new
-            eval "_new=\${_bin_${_choice}}"
-            if [ -f "$CONF" ]; then
-              local _tmp; _tmp=$(mktemp)
-              grep -v '^AGENT=' "$CONF" > "$_tmp"
-              printf 'AGENT=%s\n' "$_new" >> "$_tmp"
-              cat "$_tmp" > "$CONF"; rm -f "$_tmp"
-            fi
-            echo "  Agent set to: $_new"
-          else
+      while true; do
+        printf "   Press number to select❯ "
+        local _choice; read -r _choice
+        case "$_choice" in
+          *[!0-9]*|"")
             echo "  No change."
-          fi
-          ;;
-      esac
+            break
+            ;;
+          *)
+            if [[ "$_choice" =~ ^[0-9]+$ ]] && [ "$_choice" -ge 1 ] && [ "$_choice" -le "${#_entries[@]}" ]; then
+              local _selected_idx=$((_choice-1))
+              if [ "${_installed[$_selected_idx]}" -eq 1 ]; then
+                local _new="${_entries[$_selected_idx]}"
+                if [ -f "$CONF" ]; then
+                  local _tmp; _tmp=$(mktemp)
+                  grep -v '^AGENT=' "$CONF" > "$_tmp"
+                  printf 'AGENT=%s\n' "$_new" >> "$_tmp"
+                  cat "$_tmp" > "$CONF"; rm -f "$_tmp"
+                fi
+                echo "  Agent set to: $_new"
+                echo "  Reconfiguring companion integrations..."
+                bash "$DIR/configure.sh"
+                break
+              else
+                echo "  Agent '${_entries[$_selected_idx]}' is not installed. Please choose an installed agent."
+              fi
+            else
+              echo "  No change."
+              break
+            fi
+            ;;
+        esac
+      done
       echo ""
       ;;
     -d|--doctor)
@@ -559,7 +664,7 @@ echo
 # 1b) separate operational files into ~/.titanx --------------------------------
 TITANX_DOTDIR="$HOME/.titanx"
 mkdir -p "$TITANX_DOTDIR"
-for f in update.sh doctor.sh conf.txt manifest.txt version.txt; do
+for f in update.sh doctor.sh configure.sh conf.txt manifest.txt version.txt; do
   if [ -f "$TARGET/$f" ]; then
     cp "$TARGET/$f" "$TITANX_DOTDIR/$f"
     rm "$TARGET/$f"
@@ -619,108 +724,12 @@ fi
 echo
 
 # 4) companion audit ---------------------------------------------------------
-missing_required=0
-mcp_used=0          # any tool falling back to MCP instead of CLI
-need_env_grafana=0
-need_env_sentry=0
-
-MCP_JSON="$TARGET/.mcp.json"
 fetch_tokens
-add_grafana_mcp=0  # set to 1 if we need to inject grafana MCP into .mcp.json
-add_sentry_mcp=0   # set to 1 if we need to inject sentry MCP into .mcp.json
+write_agent_conf "$SELECTED_AGENT"
 
 echo -e " ${COLOR_BOLD}Step 4: Auditing Companion Integrations${COLOR_RESET}"
-echo -e "   ${COLOR_GRAY}Grafana + Sentry: MCP preferred; CLI accepted as fallback.${COLOR_RESET}"
-echo -e "   ${COLOR_GRAY}All other tools: CLI preferred — optimised for token usage. MCP accepted as fallback.${COLOR_RESET}\n"
-
-# --- Observability (Grafana, Sentry) — MCP preferred; CLI fallback ---
-echo -e "   ${COLOR_GRAY}Observability & Errors:${COLOR_RESET}"
-
-padded_grafana=$(printf "%-14s" "Grafana")
-if mcp_present "grafana"; then
-  echo -e "   ${symbol_success} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} MCP (${COLOR_GREEN}grafana${COLOR_RESET}) ${COLOR_GRAY}[user-level (Claude Code only)]${COLOR_RESET}"
-elif have gcx; then
-  echo -e "   ${symbol_warn} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} CLI fallback (${COLOR_YELLOW}gcx${COLOR_RESET}) — prefer the grafana MCP: ${COLOR_UNDERLINE}${URL_GCX}${COLOR_RESET}"
-  mcp_used=1
-else
-  echo -e "   ${symbol_warn} ${padded_grafana} ${COLOR_GRAY}→${COLOR_RESET} not found — adding to project ${COLOR_CYAN}.mcp.json${COLOR_RESET} (uvx mcp-grafana)"
-  echo -e "                  ${COLOR_GRAY}Set ${COLOR_RESET}GRAFANA_SERVICE_ACCOUNT_TOKEN${COLOR_GRAY} in ${COLOR_RESET}$MCP_JSON${COLOR_GRAY} after install${COLOR_RESET}"
-  add_grafana_mcp=1; need_env_grafana=1
-fi
-
-padded_sentry=$(printf "%-14s" "Sentry")
-if mcp_present "sentry"; then
-  echo -e "   ${symbol_success} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} MCP (${COLOR_GREEN}sentry${COLOR_RESET}) ${COLOR_GRAY}[user-level (Claude Code only)]${COLOR_RESET}"
-elif have sentry; then
-  echo -e "   ${symbol_warn} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} CLI fallback (${COLOR_YELLOW}sentry${COLOR_RESET}) — prefer the sentry MCP: ${COLOR_UNDERLINE}${URL_SENTRY_CLI}${COLOR_RESET}"
-  mcp_used=1
-else
-  echo -e "   ${symbol_warn} ${padded_sentry} ${COLOR_GRAY}→${COLOR_RESET} not found — adding to project ${COLOR_CYAN}.mcp.json${COLOR_RESET} (@sentry/mcp-server)"
-  echo -e "                  ${COLOR_GRAY}Set ${COLOR_RESET}SENTRY_AUTH_TOKEN${COLOR_GRAY} in ${COLOR_RESET}$MCP_JSON${COLOR_GRAY} after install${COLOR_RESET}"
-  add_sentry_mcp=1; need_env_sentry=1
-fi
-
-# Write .mcp.json (always) — injects grafana/sentry MCP blocks when neither user-level MCP nor CLI fallback was found
-write_project_mcp_json "$MCP_JSON" "$add_grafana_mcp" "$add_sentry_mcp"
-
-# Check runtime dependencies for injected MCP servers
-if [ "$add_grafana_mcp" -eq 1 ] && ! have uvx; then
-  echo -e "   ${symbol_warn} ${COLOR_YELLOW}uvx${COLOR_RESET} not found — required to run the grafana MCP (mcp-grafana)"
-  echo -e "     Install uv (includes uvx): ${COLOR_UNDERLINE}https://docs.astral.sh/uv/getting-started/installation/${COLOR_RESET}"
-  echo -e "     ${COLOR_GRAY}Quick install: ${COLOR_RESET}curl -LsSf https://astral.sh/uv/install.sh | sh"
-fi
-if [ "$add_sentry_mcp" -eq 1 ] && ! have npx; then
-  echo -e "   ${symbol_warn} ${COLOR_YELLOW}npx${COLOR_RESET} not found — required to run the sentry MCP (@sentry/mcp-server)"
-  echo -e "     Install Node.js (includes npx): ${COLOR_UNDERLINE}https://nodejs.org/en/download${COLOR_RESET}"
-  echo -e "     ${COLOR_GRAY}Quick install: ${COLOR_RESET}brew install node"
-fi
-
-# Write .env only when at least one observability CLI is absent
-if [ "$need_env_grafana" -eq 1 ] || [ "$need_env_sentry" -eq 1 ]; then
-  write_env_file "$TARGET/.env" "$need_env_grafana" "$need_env_sentry"
-fi
-
-# --- Code & infra (kubectl, gh) — CLI preferred ---
-echo
-echo -e "   ${COLOR_GRAY}Code & Infra:${COLOR_RESET}"
-
-padded_k8s=$(printf "%-14s" "Kubernetes")
-if have kubectl; then
-  echo -e "   ${symbol_success} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} CLI (${COLOR_GREEN}kubectl${COLOR_RESET})"
-elif mcp_present "kubernetes"; then
-  echo -e "   ${symbol_warn} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}kubernetes${COLOR_RESET}) — install kubectl: ${COLOR_UNDERLINE}${URL_KUBECTL}${COLOR_RESET}"
-  mcp_used=1
-else
-  echo -e "   ${symbol_error} ${padded_k8s} ${COLOR_GRAY}→${COLOR_RESET} ${COLOR_RED}MISSING (REQUIRED)${COLOR_RESET}"
-  echo -e "                  Install kubectl: ${COLOR_UNDERLINE}${URL_KUBECTL}${COLOR_RESET}"
-  missing_required=1
-fi
-
-padded_code=$(printf "%-14s" "Code")
-if have gh; then
-  echo -e "   ${symbol_success} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} CLI (${COLOR_GREEN}gh${COLOR_RESET})"
-elif mcp_present "github"; then
-  echo -e "   ${symbol_warn} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} MCP fallback (${COLOR_YELLOW}github${COLOR_RESET}) — install gh CLI: ${COLOR_UNDERLINE}${URL_GH_CLI}${COLOR_RESET}"
-  mcp_used=1
-else
-  echo -e "   ${symbol_error} ${padded_code} ${COLOR_GRAY}→${COLOR_RESET} ${COLOR_RED}MISSING (REQUIRED)${COLOR_RESET}"
-  echo -e "                  Install gh CLI: ${COLOR_UNDERLINE}${URL_GH_CLI}${COLOR_RESET}${COLOR_GRAY}, then run ${COLOR_RESET}gh auth login"
-  missing_required=1
-fi
-
-padded_wiki=$(printf "%-14s" "Wiki")
-if mcp_present "confluence" || mcp_present "rovo"; then
-  echo -e "   ${symbol_success} ${padded_wiki} ${COLOR_GRAY}→${COLOR_RESET} user-level MCP (${COLOR_GREEN}confluence/rovo${COLOR_RESET}) ${COLOR_GRAY}[Claude Code only]${COLOR_RESET}"
-else
-  echo -e "   ${symbol_bullet} ${padded_wiki} ${COLOR_GRAY}→${COLOR_RESET} optional not found"
-  echo -e "                  ${COLOR_GRAY}Allows access to: team docs + runbooks${COLOR_RESET}"
-fi
-
-if [ "$mcp_used" -eq 1 ]; then
-  echo
-  echo -e "   ${symbol_info} ${COLOR_YELLOW}For non-Grafana tools, CLIs use far fewer tokens than MCPs${COLOR_RESET}"
-  echo -e "     ${COLOR_UNDERLINE}${URL_CLI_PREFERRED_DOC}${COLOR_RESET}"
-fi
+missing_required=0
+bash "$TITANX_DOTDIR/configure.sh" || missing_required=1
 echo
 
 # 5) summary -----------------------------------------------------------------
