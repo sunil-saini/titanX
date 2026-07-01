@@ -481,20 +481,16 @@ titanx() {
       ;;
     -a|--agent)
       echo ""
-      local _entries=("claude" "opencode" "codex" "agy")
-      local _labels=("Claude Code" "OpenCode" "OpenAI Codex" "Antigravity")
-      local _installed=() _total_installed=0 _first_installed=""
+      local _total_installed=0 _first_installed=""
+      local _pair _bin _lbl _marker _is_inst
 
-      for _i in "${!_entries[@]}"; do
-        local _bin="${_entries[$_i]}"
+      for _pair in "claude:Claude Code" "opencode:OpenCode" "codex:OpenAI Codex" "agy:Antigravity"; do
+        _bin="${_pair%%:*}"
         if command -v "$_bin" >/dev/null 2>&1; then
-          _installed+=(1)
           _total_installed=$((_total_installed + 1))
           if [ -z "$_first_installed" ]; then
             _first_installed="$_bin"
           fi
-        else
-          _installed+=(0)
         fi
       done
 
@@ -506,18 +502,21 @@ titanx() {
       fi
 
       echo "  Select AI agent:"
-      for _i in "${!_entries[@]}"; do
-        local _bin="${_entries[$_i]}" _lbl="${_labels[$_i]}" _is_inst="${_installed[$_i]}"
-        local _marker="    "
+      local _i=1
+      for _pair in "claude:Claude Code" "opencode:OpenCode" "codex:OpenAI Codex" "agy:Antigravity"; do
+        _bin="${_pair%%:*}"
+        _lbl="${_pair#*:}"
+        _marker="    "
         if [ "$_bin" = "$agent" ]; then
           _marker="➜   "
         fi
         
-        if [ "$_is_inst" -eq 1 ]; then
-          printf "   %s%d) %-12s %s\n" "$_marker" "$(( _i + 1 ))" "$_bin" "$_lbl"
+        if command -v "$_bin" >/dev/null 2>&1; then
+          printf "   %s%d) %-12s %s\n" "$_marker" "$_i" "$_bin" "$_lbl"
         else
-          printf "   %s${COLOR_GRAY}%d) %-12s %s (not installed)${COLOR_RESET}\n" "$_marker" "$(( _i + 1 ))" "$_bin" "$_lbl"
+          printf "   %s${COLOR_GRAY}%d) %-12s %s (not installed)${COLOR_RESET}\n" "$_marker" "$_i" "$_bin" "$_lbl"
         fi
+        _i=$((_i + 1))
       done
 
       while true; do
@@ -529,10 +528,20 @@ titanx() {
             break
             ;;
           *)
-            if [[ "$_choice" =~ ^[0-9]+$ ]] && [ "$_choice" -ge 1 ] && [ "$_choice" -le "${#_entries[@]}" ]; then
-              local _selected_idx=$((_choice-1))
-              if [ "${_installed[$_selected_idx]}" -eq 1 ]; then
-                local _new="${_entries[$_selected_idx]}"
+            if [ "$_choice" -ge 1 ] && [ "$_choice" -le 4 ]; then
+              local _curr_idx=1 _new="" _new_installed=0
+              for _pair in "claude:Claude Code" "opencode:OpenCode" "codex:OpenAI Codex" "agy:Antigravity"; do
+                if [ "$_curr_idx" -eq "$_choice" ]; then
+                  _new="${_pair%%:*}"
+                  if command -v "$_new" >/dev/null 2>&1; then
+                    _new_installed=1
+                  fi
+                  break
+                fi
+                _curr_idx=$((_curr_idx + 1))
+              done
+
+              if [ "$_new_installed" -eq 1 ]; then
                 if [ -f "$CONF" ]; then
                   local _tmp; _tmp=$(mktemp)
                   grep -v '^AGENT=' "$CONF" > "$_tmp" || true
@@ -544,7 +553,7 @@ titanx() {
                 bash "$DIR/configure.sh"
                 break
               else
-                echo "  Agent '${_entries[$_selected_idx]}' is not installed. Please choose an installed agent."
+                echo "  Agent '$_new' is not installed. Please choose an installed agent."
               fi
             else
               echo "  No change."
