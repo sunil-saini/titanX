@@ -319,7 +319,7 @@ select_agent() {
     labels+=("$label")
     if have "$bin"; then
       installed+=(1)
-      ((total_installed++))
+      total_installed=$((total_installed + 1))
       if [ -z "$first_installed" ]; then
         first_installed="$bin"
       fi
@@ -489,7 +489,7 @@ titanx() {
         local _bin="${_entries[$_i]}"
         if command -v "$_bin" >/dev/null 2>&1; then
           _installed+=(1)
-          ((_total_installed++))
+          _total_installed=$((_total_installed + 1))
           if [ -z "$_first_installed" ]; then
             _first_installed="$_bin"
           fi
