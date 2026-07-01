@@ -320,7 +320,9 @@ select_agent() {
     if have "$bin"; then
       installed+=(1)
       ((total_installed++))
-      [ -z "$first_installed" ] && first_installed="$bin"
+      if [ -z "$first_installed" ]; then
+        first_installed="$bin"
+      fi
     else
       installed+=(0)
     fi
@@ -344,7 +346,9 @@ select_agent() {
   for idx in "${!entries[@]}"; do
     local bin="${entries[$idx]}" label="${labels[$idx]}" is_inst="${installed[$idx]}"
     local marker="    "
-    [ "$bin" = "$current" ] && marker="  ${COLOR_PURPLE}➜${COLOR_RESET} "
+    if [ "$bin" = "$current" ]; then
+      marker="  ${COLOR_PURPLE}➜${COLOR_RESET} "
+    fi
     
     if [ "$is_inst" -eq 1 ]; then
       printf "     %s%d) %-12s ${COLOR_RESET}%s\n" "$marker" "$(( idx + 1 ))" "$bin" "$label"
@@ -385,8 +389,12 @@ write_agent_conf() {
     local tmp; tmp="$(mktemp)"
     grep -v -e '^AGENT=' -e '^GRAFANA_TOKEN=' -e '^SENTRY_TOKEN=' "$conf" > "$tmp" || true
     printf 'AGENT=%s\n' "$agent" >> "$tmp"
-    [ -n "${TITANX_GRAFANA_TOKEN:-}" ] && printf 'GRAFANA_TOKEN=%s\n' "$TITANX_GRAFANA_TOKEN" >> "$tmp"
-    [ -n "${TITANX_SENTRY_TOKEN:-}" ] && printf 'SENTRY_TOKEN=%s\n' "$TITANX_SENTRY_TOKEN" >> "$tmp"
+    if [ -n "${TITANX_GRAFANA_TOKEN:-}" ]; then
+      printf 'GRAFANA_TOKEN=%s\n' "$TITANX_GRAFANA_TOKEN" >> "$tmp"
+    fi
+    if [ -n "${TITANX_SENTRY_TOKEN:-}" ]; then
+      printf 'SENTRY_TOKEN=%s\n' "$TITANX_SENTRY_TOKEN" >> "$tmp"
+    fi
     cat "$tmp" > "$conf"; rm -f "$tmp"
   fi
 }
@@ -482,7 +490,9 @@ titanx() {
         if command -v "$_bin" >/dev/null 2>&1; then
           _installed+=(1)
           ((_total_installed++))
-          [ -z "$_first_installed" ] && _first_installed="$_bin"
+          if [ -z "$_first_installed" ]; then
+            _first_installed="$_bin"
+          fi
         else
           _installed+=(0)
         fi
@@ -499,7 +509,9 @@ titanx() {
       for _i in "${!_entries[@]}"; do
         local _bin="${_entries[$_i]}" _lbl="${_labels[$_i]}" _is_inst="${_installed[$_i]}"
         local _marker="    "
-        [ "$_bin" = "$agent" ] && _marker="➜   "
+        if [ "$_bin" = "$agent" ]; then
+          _marker="➜   "
+        fi
         
         if [ "$_is_inst" -eq 1 ]; then
           printf "   %s%d) %-12s %s\n" "$_marker" "$(( _i + 1 ))" "$_bin" "$_lbl"
@@ -570,7 +582,9 @@ titanx() {
 
       # 2) Resolve project directory from ~/.titanx/project before deleting it
       local proj_dir=""
-      [ -f "$HOME/.titanx/project" ] && proj_dir=$(cat "$HOME/.titanx/project" | tr -d '[:space:]')
+      if [ -f "$HOME/.titanx/project" ]; then
+        proj_dir=$(cat "$HOME/.titanx/project" | tr -d '[:space:]')
+      fi
       proj_dir=${proj_dir:-$HOME/titanx}
 
       # 3) Remove directories
@@ -622,7 +636,7 @@ SH_EOF
   cat >> "$tmp" << FUNCEOF
 
 # titanx shell integration
-[ -f "$HOME/.titanx/titanx.sh" ] && source "$HOME/.titanx/titanx.sh"
+[ -f "$HOME/.titanx/titanx.sh" ] && source "$HOME/.titanx/titanx.sh" || true
 FUNCEOF
 
   cat "$tmp" > "$ALIAS_RC"; rm "$tmp"
@@ -696,14 +710,18 @@ echo -e " ${COLOR_BOLD}Step 2: AI Agent & Shell Integration${COLOR_RESET}"
 
 # Read current agent from conf.txt if it exists (re-install / --force case)
 current_agent=""
-[ -f "$HOME/.titanx/conf.txt" ] && current_agent=$(grep '^AGENT=' "$HOME/.titanx/conf.txt" 2>/dev/null | cut -d= -f2)
+if [ -f "$HOME/.titanx/conf.txt" ]; then
+  current_agent=$(grep '^AGENT=' "$HOME/.titanx/conf.txt" 2>/dev/null | cut -d= -f2)
+fi
 
 select_agent "$current_agent"
 write_agent_conf "$SELECTED_AGENT"
 
 set_titanx_function
 if [ -n "$ALIAS_RC" ]; then
-  [ "$AGENT_AUTOSELECTED" -eq 0 ] && echo -e "   ${symbol_success} Agent ${COLOR_CYAN}${SELECTED_AGENT}${COLOR_RESET} selected"
+  if [ "$AGENT_AUTOSELECTED" -eq 0 ]; then
+    echo -e "   ${symbol_success} Agent ${COLOR_CYAN}${SELECTED_AGENT}${COLOR_RESET} selected"
+  fi
   echo -e "   ${symbol_success} Registered ${COLOR_CYAN}titanx${COLOR_RESET} function in ${COLOR_CYAN}$ALIAS_RC${COLOR_RESET}"
   echo -e "     ${COLOR_GRAY}You can now run: ${COLOR_RESET}source $ALIAS_RC${COLOR_GRAY} (or open a new terminal)${COLOR_RESET}"
 fi
@@ -725,7 +743,9 @@ if have "$SELECTED_AGENT"; then
 else
   url=$(agent_install_url "$SELECTED_AGENT")
   echo -e "   ${symbol_error} ${SELECTED_AGENT} not found"
-  [ -n "$url" ] && echo -e "     ${COLOR_RED}Please install it: ${COLOR_UNDERLINE}${url}${COLOR_RESET}"
+  if [ -n "$url" ]; then
+    echo -e "     ${COLOR_RED}Please install it: ${COLOR_UNDERLINE}${url}${COLOR_RESET}"
+  fi
 fi
 
 if have curl; then
